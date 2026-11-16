@@ -16,12 +16,12 @@ while True:
   with Session() as s:
    row=s.get(MiningRun,int(item[1]))
    if not row or row.state!='queued':continue
-   snapshot=row.result['snapshot'];row.state='running';s.commit()
+   snapshot=row.result['snapshot'];provenance=row.result.get('provenance',{});row.state='running';s.commit()
    try:
     result=mine(snapshot,row.min_support,row.min_confidence,row.min_lift)
     s.query(AssociationRule).filter_by(run_id=row.id).delete()
     for rule in result['rules']:s.add(AssociationRule(run_id=row.id,**rule))
-    row.result={**result,'snapshot':snapshot};row.state='done'
+    row.result={**result,'snapshot':snapshot,'provenance':provenance};row.state='done'
     Path('/artifacts/'+str(row.id)+'.json').write_text(json.dumps(row.result,ensure_ascii=False))
    except Exception as e:row.state='failed';row.error=str(e)
    s.commit()

@@ -1,7 +1,9 @@
 import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
-engine=create_engine(os.environ['DATABASE_URL'],pool_pre_ping=True)
+url=os.environ['DATABASE_URL']
+extra={'connect_args':{'check_same_thread':False,'timeout':30}} if url.startswith('sqlite') else {}
+engine=create_engine(url,pool_pre_ping=True,**extra)
 Session=sessionmaker(bind=engine,expire_on_commit=False)
 Base=declarative_base()
 def db():

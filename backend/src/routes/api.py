@@ -3,11 +3,12 @@ import redis
 from fastapi import APIRouter,Depends,HTTPException,Response
 from src.config.database import db
 from src.models.entities import User,Job,MiningRun,AssociationRule,Kit,Audit
-from src.schemas.business import Login,JobInput,RunInput,KitInput,KitEdit
+from src.schemas.business import Login,JobInput,RunInput,KitInput,KitEdit,EntryInput
 from src.middlewares.auth import current,editor,admin
 from src.utils.security import verify,token
 from src.services.business import audit,dump
 from src.services.jobs import save_job
+from src.services.ledger import post_entry,settle_job,reopen_job,job_ledger,recent,void_pending
 from src.controllers.business import ensure_run,ensure_rule,ensure_kit
 router=APIRouter()
 @router.post('/auth/login')
@@ -25,12 +26,36 @@ def create_job(data:JobInput,u=Depends(editor),s=Depends(db)):
 @router.put('/jobs/{i}')
 def edit_job(i:int,data:JobInput,u=Depends(editor),s=Depends(db)):
  r=save_job(s,data,i);audit(s,u,'修订作业 '+str(i));return r
+@router.get('/jobs/{code}/ledger')
+def ledger_detail(code:str,u=Depends(current),s=Depends(db)):return job_ledger(s,code)
+@router.post('/jobs/{code}/settle')
+def settle(code:str,u=Depends(editor),s=Depends(db)):return settle_job(s,u.email,code)
+@router.post('/jobs/{code}/reopen')
+def reopen(code:str,u=Depends(editor),s=Depends(db)):return reopen_job(s,u.email,code)
+@router.get('/ledger/entries')
+def entries(limit:int=200,u=Depends(current),s=Depends(db)):
+ return recent(s,max(1,min(limit,1000)))
+@router.post('/ledger/entries')
+def create_entry(data:EntryInput,u=Depends(editor),s=Depends(db)):
+ if data.job_id:
+  job=s.get(Job,data.job_id)
+  if not job:raise HTTPException(404,'维保作业不存在')
+  data.job_code=job.code;data.job_id=None
+ return post_entry(s,u.email,data)
+@router.post('/ledger/entries/{entry_no}/void')
+def void_entry(entry_no:str,u=Depends(editor),s=Depends(db)):
+ return void_pending(s,u.email,entry_no)
 @router.get('/runs')
 def runs(u=Depends(current),s=Depends(db)):return [dump(r) for r in s.query(MiningRun).order_by(MiningRun.id.desc()).all()]
 @router.post('/runs')
 def run(data:RunInput,u=Depends(editor),s=Depends(db)):
- rows=[dump(r) for r in s.query(Job).order_by(Job.id).all() if data.equipment=='全部' or r.equipment==data.equipment]
- r=MiningRun(**data.model_dump(),result={'snapshot':rows});s.add(r);s.commit()
+ jobs=s.query(Job).order_by(Job.id).all()
+ scoped=[j for j in jobs if data.equipment=='全部' or j.equipment==data.equipment]
+ # 核算中（open）作业尚未结清，整体排除；手工作业与已结清作业按快照进入。
+ open_jobs=[j for j in scoped if j.ledger_state=='open']
+ rows=[dump(j) for j in scoped if j.ledger_state!='open']
+ provenance={'settled':sum(1 for r in rows if r['ledger_state']=='settled'),'manual':sum(1 for r in rows if r['ledger_state']=='manual'),'excluded_open':len(open_jobs),'excluded_open_codes':[j.code for j in open_jobs]}
+ r=MiningRun(**data.model_dump(),result={'snapshot':rows,'provenance':provenance});s.add(r);s.commit()
  try:redis.Redis.from_url(os.environ['REDIS_URL']).rpush('affinity:runs',r.id)
  except redis.RedisError:r.state='failed';r.error='队列暂不可用，请恢复后新建挖掘';s.commit();raise HTTPException(503,r.error)
  audit(s,u,'提交挖掘 '+str(r.id));return dump(r)
